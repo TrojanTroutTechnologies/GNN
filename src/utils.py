@@ -44,13 +44,16 @@ def visualize_simulation(timesteps: np.ndarray, checkpoint: int) -> None:
 def generate_noise(position_seq: torch.Tensor, noise_std: float) -> torch.Tensor:
     """Generate noise for a trajectory"""
     velocity_seq = position_seq[1:] - position_seq[:-1]
+
     time_steps = velocity_seq.size(0)
     velocity_noise = torch.randn_like(velocity_seq) * (noise_std / time_steps**0.5)
-    velocity_noise = velocity_noise.cumsum(dim=1)
-    position_noise = velocity_noise.cumsum(dim=1)
-    position_noise = torch.cat(
-        (torch.zeros_like(position_noise)[:, 0:1], position_noise), dim=1
-    )
+    velocity_noise = velocity_noise.cumsum(dim=0)
+    position_noise = velocity_noise.cumsum(dim=0)
+
+    zero_noise = torch.zeros_like(position_noise[:1])
+
+    position_noise = torch.cat((zero_noise, position_noise), dim=0)
+
     return position_noise
 
 
@@ -109,7 +112,7 @@ def to_graph(
         next_velocity = target_position - recent_position
         acceleration = next_velocity - last_velocity
         acceleration = (acceleration - torch.tensor(metadata["acc_mean"])) / torch.sqrt(
-            torch.tensor(metadata["acc_std"]) ** 2
+            torch.tensor(metadata["acc_std"]) ** 2 + noise_std**2
         )
     else:
         acceleration = None
@@ -158,7 +161,7 @@ def rollout(
             acceleration = model(graph).cpu()
 
             acceleration = acceleration * torch.sqrt(
-                torch.tensor(metadata["acc_std"]) ** 2
+                torch.tensor(metadata["acc_std"]) ** 2 + noise_std**2
             ) + torch.tensor(metadata["acc_mean"])
 
             recent_position = traj[-1]

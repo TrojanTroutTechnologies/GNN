@@ -58,9 +58,8 @@ class OneStepDataset(pyg.data.Dataset):
 
 def oneStepMSE(
     simulator: torch.nn.Module,
-    dataloader: pyg.loader.DataLoader,
+    valid_simulation: pyg.loader.DataLoader,
     metadata: dict,
-    noise=0.0,
 ) -> tuple:
     """Returns two values, loss and MSE"""
     total_loss = 0.0
@@ -70,14 +69,15 @@ def oneStepMSE(
     scale = torch.sqrt(torch.tensor(metadata["acc_std"]) ** 2).cuda()
     simulator.eval()
     with torch.no_grad():
-        for data in dataloader:
-            data = data.cuda()
-            target_position = data.y
-            output = simulator(data)
-            output = output * scale + torch.tensor(metadata["acc_mean"]).cuda()
-            loss = nn.MSELoss()(output, target_position)
+        for window in valid_simulation:
+            window = window.cuda()
+            preds = simulator(window)
+
+            mse = (((preds - window.y) * scale) ** 2).sum(dim=-1).mean()
+            loss = ((preds - window.y) ** 2).mean()
+
+            total_mse += mse.item()
             total_loss += loss.item()
-            total_mse += nn.MSELoss()(output, target_position).item()
             batch_count += 1
 
     return total_loss / batch_count, total_mse / batch_count
@@ -127,9 +127,7 @@ def train(params, simulator, train_loader, valid_loader):
 
             if total_step % params["eval_interval"] == 0:
                 simulator.eval()
-                eval_loss, onestep_mse = oneStepMSE(
-                    simulator, valid_loader, metadata, params["noise_std"]
-                )
+                eval_loss, onestep_mse = oneStepMSE(simulator, valid_loader, metadata)
                 eval_loss_total.append((total_step, eval_loss))
                 onestep_mse_total.append((total_step, onestep_mse))
                 tqdm.write(f"\nEval: Loss: {eval_loss}, One Step MSE: {onestep_mse}")
@@ -149,7 +147,6 @@ def train(params, simulator, train_loader, valid_loader):
 
 
 if __name__ == "__main__":
-
     params = {
         "epochs": 1,
         "batch_size": 16,
@@ -168,7 +165,7 @@ if __name__ == "__main__":
         "data/processed/train.npz",
         metadata,
         window_size=7,
-        noise_std=0.0,
+        noise_std=params["noise_std"],
     )
     valid_dataset = OneStepDataset(
         "data/processed/valid.npz", metadata, window_size=7, noise_std=0.0
@@ -190,6 +187,13 @@ if __name__ == "__main__":
 
     simulator = LearnedSimulator(window_size=7)
     simulator = simulator.cuda()
+
+    # Load the model
+    checkpoint = torch.load(
+        "checkpoints/epoch_1/final_checkpoint.pt", weights_only=True
+    )
+    simulator.load_state_dict(checkpoint["model"])
+
     train_loss, eval_loss, onetep_mse = train(
         params, simulator, train_loader, valid_loader
     )
