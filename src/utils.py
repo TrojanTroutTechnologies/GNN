@@ -50,6 +50,7 @@ def generate_noise(position_seq: torch.Tensor, noise_std: float) -> torch.Tensor
     velocity_noise = velocity_noise.cumsum(dim=0)
     position_noise = velocity_noise.cumsum(dim=0)
 
+    # Don't add noise to the first position
     zero_noise = torch.zeros_like(position_noise[:1])
 
     position_noise = torch.cat((zero_noise, position_noise), dim=0)
@@ -66,11 +67,11 @@ def to_graph(
 ) -> pyg.data.Data:
     """Preprocess a trajectory and construct the graph"""
     # apply noise to the trajectory
-    # position_noise = generate_noise(position_seq, noise_std)
-    # position_seq = position_seq + position_noise
+    position_noise = generate_noise(position_seq, noise_std)
+    position_seq = position_seq + position_noise
 
-    # calculate the velocities of particles
     recent_position = position_seq[-1]
+    # calculate the velocities of particles
     # subtracts the first three positions from the last three positions. [:-1] reverses the order
     velocity_seq = position_seq[1:] - position_seq[:-1]
 
@@ -86,7 +87,7 @@ def to_graph(
     # node-level features: velocity, distance to the boundary
     normal_velocity_seq = (
         velocity_seq - torch.tensor(metadata["vel_mean"])
-    ) / torch.sqrt(torch.tensor(metadata["vel_std"]) ** 2)
+    ) / torch.sqrt(torch.tensor(metadata["vel_std"]) ** 2 + noise_std**2)
     boundary = torch.tensor(metadata["bounds"])
     distance_to_lower_boundary = recent_position - boundary[:, 0]
     distance_to_upper_boundary = boundary[:, 1] - recent_position
@@ -109,7 +110,7 @@ def to_graph(
     # ground truth for training
     if target_position is not None:
         last_velocity = velocity_seq[-1]
-        next_velocity = target_position - recent_position
+        next_velocity = target_position + position_noise[-1] - recent_position
         acceleration = next_velocity - last_velocity
         acceleration = (acceleration - torch.tensor(metadata["acc_mean"])) / torch.sqrt(
             torch.tensor(metadata["acc_std"]) ** 2 + noise_std**2
