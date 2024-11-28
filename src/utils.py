@@ -139,7 +139,6 @@ def rollout(
     model: torch.nn.Module,
     data: pyg.loader.DataLoader,
     metadata: dict,
-    noise_std: float,
 ) -> torch.Tensor:
     model.eval()
 
@@ -156,13 +155,13 @@ def rollout(
         with torch.no_grad():
             if time != 0:
                 graph = to_graph(
-                    particle_types, traj[-(window_size - 1) :], None, metadata
+                    particle_types, traj[-(window_size - 1) :], None, metadata, 0.0
                 )
             graph = graph.cuda()
             acceleration = model(graph).cpu()
 
             acceleration = acceleration * torch.sqrt(
-                torch.tensor(metadata["acc_std"]) ** 2 + noise_std**2
+                torch.tensor(metadata["acc_std"]) ** 2
             ) + torch.tensor(metadata["acc_mean"])
 
             recent_position = traj[-1]
