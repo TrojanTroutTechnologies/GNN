@@ -66,7 +66,10 @@ def oneStepMSE(
     total_mse = 0.0
     batch_count = 0
 
-    scale = torch.sqrt(torch.tensor(metadata["acc_std"]) ** 2).cuda()
+    scale = (
+        torch.sqrt(torch.tensor(metadata["acc_std"]) ** 2)
+        + torch.tensor(metadata["acc_mean"])
+    ).cuda()
     simulator.eval()
     with torch.no_grad():
         for window in valid_simulation:
@@ -83,7 +86,12 @@ def oneStepMSE(
     return total_loss / batch_count, total_mse / batch_count
 
 
-def train(params, simulator, train_loader, valid_loader):
+def train(
+    params: dict,
+    simulator: torch.nn.Module,
+    train_loader: pyg.data.DataLoader,
+    valid_loader: pyg.data.DataLoader,
+) -> None:
     loss_fn = nn.MSELoss()
     optimizer = torch.optim.Adam(simulator.parameters(), lr=params["lr"])
     scheduler = torch.optim.lr_scheduler.ExponentialLR(
@@ -91,9 +99,6 @@ def train(params, simulator, train_loader, valid_loader):
     )
 
     # log the loss
-    train_loss_total = []
-    eval_loss_total = []
-    onestep_mse_total = []
     total_step = 0
 
     for i in range(params["epochs"]):
@@ -123,13 +128,10 @@ def train(params, simulator, train_loader, valid_loader):
                 }
             )
             total_step += 1
-            train_loss_total.append((total_step, loss.item()))
 
             if total_step % params["eval_interval"] == 0:
                 simulator.eval()
                 eval_loss, onestep_mse = oneStepMSE(simulator, valid_loader, metadata)
-                eval_loss_total.append((total_step, eval_loss))
-                onestep_mse_total.append((total_step, onestep_mse))
                 tqdm.write(f"\nEval: Loss: {eval_loss}, One Step MSE: {onestep_mse}")
                 simulator.train()
 
@@ -140,35 +142,49 @@ def train(params, simulator, train_loader, valid_loader):
                         "optimizer": optimizer.state_dict(),
                         "scheduler": scheduler.state_dict(),
                     },
-                    os.path.join(params["model_path"], f"checkpoint_{total_step}.pt"),
+                    os.path.join(
+                        params["model_path"],
+                        f"epoch_{params["load_epoch"] + 1 + i}",
+                        f"checkpoint_{total_step}.pt",
+                    ),
                 )
 
-    return train_loss_total, eval_loss_total, onestep_mse_total
+        return
 
 
 if __name__ == "__main__":
     params = {
-        "epochs": 1,
+        "epochs": 5,
         "batch_size": 16,
         "lr": 1e-4,
         "noise_std": 3e-4,
         "save_interval": 1000,
         "eval_interval": 1000,
         "model_path": "checkpoints",
+        "load_epoch": 0,
+        "window_size": 7,
     }
+
     if not os.path.exists(params["model_path"]):
         os.makedirs(params["model_path"])
+
+    for i in range(params["epochs"]):
+        if not os.path.exists(f"checkpoints/epoch_{params["load_epoch"] + 1 + i}"):
+            os.makedirs(f"checkpoints/epoch_{params["load_epoch"] + 1 + i}")
 
     metadata = get_metadata()
 
     train_dataset = OneStepDataset(
         "data/processed/train.npz",
         metadata,
-        window_size=7,
+        window_size=params["window_size"],
         noise_std=params["noise_std"],
     )
     valid_dataset = OneStepDataset(
-        "data/processed/valid.npz", metadata, window_size=7, noise_std=0.0
+        "data/processed/valid.npz",
+        metadata,
+        window_size=params["window_size"],
+        noise_std=0.0,
     )
     train_loader = pyg.loader.DataLoader(
         train_dataset,
@@ -185,15 +201,15 @@ if __name__ == "__main__":
         num_workers=2,
     )
 
-    simulator = LearnedSimulator(window_size=7)
+    simulator = LearnedSimulator(window_size=params["window_size"])
     simulator = simulator.cuda()
 
     # Load the model
-    checkpoint = torch.load(
-        "checkpoints/epoch_1/final_checkpoint.pt", weights_only=True
-    )
-    simulator.load_state_dict(checkpoint["model"])
+    if params["load_epoch"] != 0:
+        checkpoint = torch.load(
+            f"checkpoints/epoch_{params["load_epoch"]}/final_checkpoint_epoch_{params["load_epoch"]}.pt",
+            weights_only=True,
+        )
+        simulator.load_state_dict(checkpoint["model"])
 
-    train_loss, eval_loss, onetep_mse = train(
-        params, simulator, train_loader, valid_loader
-    )
+    train(params, simulator, train_loader, valid_loader)
