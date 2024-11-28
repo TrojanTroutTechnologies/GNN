@@ -5,15 +5,16 @@ import torch.nn as nn
 import torch_geometric as pyg
 from tqdm import tqdm
 
-
 from utils import load_npz, to_graph, get_metadata
 from gnn_network import LearnedSimulator
 
 
 class OneStepDataset(pyg.data.Dataset):
-    def __init__(self, path, metadata, window_size=5):
+    def __init__(self, path, metadata, window_size=5, noise_std=0.0):
         super().__init__()
         self.data = load_npz(path)
+        self.metadata = metadata
+        self.noise_std = noise_std
 
         self.window_size = window_size
         self.windows = []
@@ -45,29 +46,40 @@ class OneStepDataset(pyg.data.Dataset):
         position_seq = torch.from_numpy(position_seq)
 
         with torch.no_grad():
-            graph = to_graph(particle_type, position_seq, target_position, metadata)
+            graph = to_graph(
+                particle_type,
+                position_seq,
+                target_position,
+                self.metadata,
+                self.noise_std,
+            )
         return graph
 
 
 def oneStepMSE(
-    simulator: torch.nn.Module, dataloader: pyg.loader.DataLoader, metadata: dict
+    simulator: torch.nn.Module,
+    dataloader: pyg.loader.DataLoader,
+    metadata: dict,
+    noise=0.0,
 ) -> tuple:
     """Returns two values, loss and MSE"""
     total_loss = 0.0
     total_mse = 0.0
     batch_count = 0
+
+    scale = torch.sqrt(torch.tensor(metadata["acc_std"]) ** 2).cuda()
     simulator.eval()
     with torch.no_grad():
-        # scale = torch.tensor(metadata["acc_std"]).cuda()
         for data in dataloader:
             data = data.cuda()
-            pred = simulator(data)
-            mse = (pred - data.y) ** 2
-            mse = mse.sum(dim=-1).mean()
-            loss = ((pred - data.y) ** 2).mean()
-            total_mse += mse.item()
+            target_position = data.y
+            output = simulator(data)
+            output = output * scale + torch.tensor(metadata["acc_mean"]).cuda()
+            loss = nn.MSELoss()(output, target_position)
             total_loss += loss.item()
+            total_mse += nn.MSELoss()(output, target_position).item()
             batch_count += 1
+
     return total_loss / batch_count, total_mse / batch_count
 
 
@@ -101,7 +113,6 @@ def train(params, simulator, train_loader, valid_loader):
 
             optimizer.step()
             scheduler.step()
-
             total_loss += loss.item()
             batch_count += 1
             progress_bar.set_postfix(
@@ -111,13 +122,14 @@ def train(params, simulator, train_loader, valid_loader):
                     "lr": optimizer.param_groups[0]["lr"],
                 }
             )
-
             total_step += 1
             train_loss_total.append((total_step, loss.item()))
 
             if total_step % params["eval_interval"] == 0:
                 simulator.eval()
-                eval_loss, onestep_mse = oneStepMSE(simulator, valid_loader, metadata)
+                eval_loss, onestep_mse = oneStepMSE(
+                    simulator, valid_loader, metadata, params["noise_std"]
+                )
                 eval_loss_total.append((total_step, eval_loss))
                 onestep_mse_total.append((total_step, onestep_mse))
                 tqdm.write(f"\nEval: Loss: {eval_loss}, One Step MSE: {onestep_mse}")
@@ -140,8 +152,9 @@ if __name__ == "__main__":
 
     params = {
         "epochs": 1,
-        "batch_size": 4,
+        "batch_size": 16,
         "lr": 1e-4,
+        "noise_std": 3e-4,
         "save_interval": 1000,
         "eval_interval": 1000,
         "model_path": "checkpoints",
@@ -151,8 +164,15 @@ if __name__ == "__main__":
 
     metadata = get_metadata()
 
-    train_dataset = OneStepDataset("data/processed/train.npz", metadata)
-    valid_dataset = OneStepDataset("data/processed/valid.npz", metadata)
+    train_dataset = OneStepDataset(
+        "data/processed/train.npz",
+        metadata,
+        window_size=7,
+        noise_std=0.0,
+    )
+    valid_dataset = OneStepDataset(
+        "data/processed/valid.npz", metadata, window_size=7, noise_std=0.0
+    )
     train_loader = pyg.loader.DataLoader(
         train_dataset,
         batch_size=params["batch_size"],
@@ -168,7 +188,7 @@ if __name__ == "__main__":
         num_workers=2,
     )
 
-    simulator = LearnedSimulator()
+    simulator = LearnedSimulator(window_size=7)
     simulator = simulator.cuda()
     train_loss, eval_loss, onetep_mse = train(
         params, simulator, train_loader, valid_loader

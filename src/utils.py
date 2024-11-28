@@ -2,6 +2,9 @@ import json
 import numpy as np
 import torch
 import torch_geometric as pyg
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from tqdm import tqdm
 
 
 def get_metadata() -> dict:
@@ -16,27 +19,32 @@ def load_npz(file_path: str) -> np.ndarray:
     return data
 
 
-def visualize_simulation(timesteps: np.ndarray) -> None:
-    import matplotlib.pyplot as plt
-    from matplotlib.animation import FuncAnimation
-
+def visualize_simulation(timesteps: np.ndarray, checkpoint: int) -> None:
     fig, ax = plt.subplots()
+    progress = tqdm(total=len(timesteps), desc="Creating Animation")
 
     def update(frame):
+        progress.update(1)
         ax.clear()
         ax.set_xlim(0.1, 0.9)
         ax.set_ylim(0.1, 0.9)
         timestep = timesteps[frame]
         ax.plot(timestep[:, 0], timestep[:, 1], "o", ms=2)
 
-    ani = FuncAnimation(fig, update, frames=990)
+    ani = FuncAnimation(
+        fig, update, frames=np.arange(0, len(timesteps)), interval=10, blit=False
+    )
+
     ani.save("simulation.mp4", writer="ffmpeg")
+
+    progress.close()
+    plt.close(fig)
 
 
 def generate_noise(position_seq: torch.Tensor, noise_std: float) -> torch.Tensor:
     """Generate noise for a trajectory"""
-    velocity_seq = position_seq[:, 1:] - position_seq[:, :-1]
-    time_steps = velocity_seq.size(1)
+    velocity_seq = position_seq[1:] - position_seq[:-1]
+    time_steps = velocity_seq.size(0)
     velocity_noise = torch.randn_like(velocity_seq) * (noise_std / time_steps**0.5)
     velocity_noise = velocity_noise.cumsum(dim=1)
     position_noise = velocity_noise.cumsum(dim=1)
@@ -60,19 +68,22 @@ def to_graph(
 
     # calculate the velocities of particles
     recent_position = position_seq[-1]
-    velocity_seq = position_seq[0] - position_seq[-1]
+    # subtracts the first three positions from the last three positions. [:-1] reverses the order
+    velocity_seq = position_seq[1:] - position_seq[:-1]
 
     # construct the graph based on the distances between particles
-    n_particle = recent_position.size(0)
+    num_particles = recent_position.size(0)
     edge_index = pyg.nn.radius_graph(
         recent_position,
         metadata["default_connectivity_radius"],
         loop=True,
-        max_num_neighbors=n_particle,
+        max_num_neighbors=num_particles - 1,
     )
 
     # node-level features: velocity, distance to the boundary
-    # normal_velocity_seq = (velocity_seq - torch.tensor(metadata["vel_mean"])) / torch.sqrt(torch.tensor(metadata["vel_std"]) ** 2 + noise_std ** 2)
+    normal_velocity_seq = (
+        velocity_seq - torch.tensor(metadata["vel_mean"])
+    ) / torch.sqrt(torch.tensor(metadata["vel_std"]) ** 2)
     boundary = torch.tensor(metadata["bounds"])
     distance_to_lower_boundary = recent_position - boundary[:, 0]
     distance_to_upper_boundary = boundary[:, 1] - recent_position
@@ -98,7 +109,7 @@ def to_graph(
         next_velocity = target_position - recent_position
         acceleration = next_velocity - last_velocity
         acceleration = (acceleration - torch.tensor(metadata["acc_mean"])) / torch.sqrt(
-            torch.tensor(metadata["acc_std"]) ** 2 + noise_std**2
+            torch.tensor(metadata["acc_std"]) ** 2
         )
     else:
         acceleration = None
@@ -109,7 +120,13 @@ def to_graph(
         edge_index=edge_index,
         edge_attr=torch.cat((edge_displacement, edge_distance), dim=-1),
         y=acceleration,
-        pos=torch.cat((velocity_seq, distance_to_boundary), dim=1),
+        pos=torch.cat(
+            (
+                normal_velocity_seq.reshape(normal_velocity_seq.size(1), -1),
+                distance_to_boundary,
+            ),
+            dim=-1,
+        ),
     )
     return graph
 
@@ -126,7 +143,7 @@ def rollout(
     particle_types = torch.from_numpy(np.array(data.windows[0]["particle_type"]))
     graph = data[0]
 
-    window_size = 5
+    window_size = model.window_size
     num_timesteps = 1000
 
     traj = positions[: window_size - 1]
@@ -141,7 +158,7 @@ def rollout(
             acceleration = model(graph).cpu()
 
             acceleration = acceleration * torch.sqrt(
-                torch.tensor(metadata["acc_std"]) ** 2 + noise_std**2
+                torch.tensor(metadata["acc_std"]) ** 2
             ) + torch.tensor(metadata["acc_mean"])
 
             recent_position = traj[-1]
