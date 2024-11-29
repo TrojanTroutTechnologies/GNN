@@ -103,10 +103,10 @@ def to_graph(
     """Edge-level features: displacement, distance"""
 
     # Find the displacement and distance between sender and receiver nodes
-    sender_indices = edge_index[0]
-    receiver_indices = edge_index[1]
-    edge_displacement = (
-        recent_position[receiver_indices] - recent_position[sender_indices]
+    edge_displacement = torch.gather(
+        recent_position, dim=0, index=edge_index[0].unsqueeze(-1).expand(-1, 2)
+    ) - torch.gather(
+        recent_position, dim=0, index=edge_index[1].unsqueeze(-1).expand(-1, 2)
     )
     edge_displacement /= metadata["default_connectivity_radius"]
     edge_distance = torch.norm(edge_displacement, dim=-1, keepdim=True)
