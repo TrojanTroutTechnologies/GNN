@@ -102,9 +102,9 @@ def to_graph(
     distance_to_boundary = torch.cat(
         (distance_to_lower_boundary, distance_to_upper_boundary), dim=-1
     )
-    distance_to_boundary = torch.clip(
-        distance_to_boundary / metadata["default_connectivity_radius"], -1.0, 1.0
-    )
+
+    # use tanh to normalize the distance to [-1, 1]
+    distance_to_boundary = torch.tanh(distance_to_boundary)
 
     # Edge-level features: Displacement and distance
     edge_displacement = recent_position[edge_index[0]] - recent_position[edge_index[1]]
@@ -161,6 +161,7 @@ def rollout(
 
     traj = positions[: window_size - 1]
 
+    print("Rolling out the model...")
     for time in range(num_timesteps - window_size):
         with torch.no_grad():
             if time != 0:
