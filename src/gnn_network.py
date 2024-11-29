@@ -5,12 +5,12 @@ import torch_geometric as pyg
 
 
 class Encode_NodeMLP(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, window_size=5):
         super().__init__()
-
+        input_size = 16 + 2 * window_size
         # Two-hidden-layers
         self.layers = nn.Sequential(
-            nn.Linear(30, 128),
+            nn.Linear(input_size, 128),
             nn.LeakyReLU(0.01),
             nn.Linear(128, 128),
             nn.LeakyReLU(0.01),
@@ -136,7 +136,7 @@ class LearnedSimulator(torch.nn.Module):
         self.window_size = window_size
         self.gnn_layers = gnn_layers
         self.embedding = nn.Embedding(num_particle_types, particle_type_size)
-        self.node_in = Encode_NodeMLP()
+        self.node_in = Encode_NodeMLP(self.window_size)
         self.edge_in = Encode_EdgeMLP()
         self.decoder = Decoder_MLP()
         self.layers = nn.ModuleList([InteractionNetwork() for _ in range(gnn_layers)])
