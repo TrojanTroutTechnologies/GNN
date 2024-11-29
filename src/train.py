@@ -1,9 +1,11 @@
 import os
+import argparse
 import numpy as np
 import torch
 import torch.nn as nn
 import torch_geometric as pyg
 from tqdm import tqdm
+import wandb
 
 from utils import load_npz, to_graph, get_metadata
 from gnn_network import LearnedSimulator
@@ -11,6 +13,19 @@ from gnn_network import LearnedSimulator
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 if torch.backends.mps.is_available():
     device = torch.device("mps")
+
+sweep_configuration = {
+    "name": "gnn_sweep",
+    "method": "bayes",
+    "metric": {"goal": "minimize", "name": "avg_loss"},
+    "parameters": {
+        "lr": {"min": 0.0001, "max": 0.1},
+        "batch_size": {"values": [4, 8, 16]},
+        "optimizer": {"values": ["adam", "sgd"]},
+        "noise_std": {"min": 0.0001, "max": 0.001},
+        "window_size": {"min": 3, "max": 9},
+    },
+}
 
 
 class OneStepDataset(pyg.data.Dataset):
@@ -91,10 +106,222 @@ def oneStepMSE(
 
 
 def train(
+    params,
+    simulator: torch.nn.Module,
+    train_loader: pyg.data.DataLoader,
+    valid_loader: pyg.data.DataLoader,
+    epochs: int = 1,
+    load_epoch: int = 0,
+    sweep: bool = False,
+) -> None:
+
+    loss_fn = nn.MSELoss()
+    optimizer = torch.optim.Adam(simulator.parameters(), lr=params.lr)
+
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(
+        optimizer, gamma=0.1 ** (1 / 5e6)
+    )
+
+    # log the loss
+    total_step = 0
+
+    for i in range(epochs):
+        simulator.train()
+        total_loss = 0
+        batch_count = 0
+
+        progress_bar = tqdm(train_loader, desc=f"Epoch {i}")
+        for batch in progress_bar:
+            optimizer.zero_grad()
+
+            batch = batch.to(device)
+            preds = simulator(batch)
+
+            loss = loss_fn(preds, batch.y)
+            loss.backward()
+
+            optimizer.step()
+            scheduler.step()
+            total_loss += loss.item()
+            batch_count += 1
+            progress_bar.set_postfix(
+                {
+                    "loss": loss.item(),
+                    "avg_loss": total_loss / batch_count,
+                    "lr": optimizer.param_groups[0]["lr"],
+                }
+            )
+
+            if sweep:
+                wandb.log(
+                    {
+                        "avg_loss": total_loss / batch_count,
+                        "lr": optimizer.param_groups[0]["lr"],
+                    }
+                )
+
+            total_step += 1
+
+            if total_step % params["eval_interval"] == 0:
+                simulator.eval()
+                eval_loss, onestep_mse = oneStepMSE(simulator, valid_loader, metadata)
+                tqdm.write(f"\nEval: Loss: {eval_loss}, One Step MSE: {onestep_mse}")
+                simulator.train()
+
+            if total_step % params["save_interval"] == 0:
+                torch.save(
+                    {
+                        "model": simulator.state_dict(),
+                        "optimizer": optimizer.state_dict(),
+                        "scheduler": scheduler.state_dict(),
+                    },
+                    os.path.join(
+                        params["model_path"],
+                        f"epoch_{load_epoch + 1 + i}",
+                        f"checkpoint_{total_step}.pt",
+                    ),
+                )
+        torch.save(
+            {
+                "model": simulator.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
+            },
+            os.path.join(
+                params["model_path"],
+                f"epoch_{load_epoch + 1 + i}",
+                f"final_checkpoint_epoch_{load_epoch + 1 + i}.pt",
+            ),
+        )
+    return
+
+
+def sweep_train(
+    params,
+    simulator: torch.nn.Module,
+    train_loader: pyg.data.DataLoader,
+    valid_loader: pyg.data.DataLoader,
+    metadata: dict,
+    epochs: int = 1,
+    load_epoch: int = 0,
+    sweep: bool = False,
+) -> None:
+
+    loss_fn = nn.MSELoss()
+    optimizer = torch.optim.Adam(simulator.parameters(), lr=params.lr)
+
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(
+        optimizer, gamma=0.1 ** (1 / 5e6)
+    )
+
+    # log the loss
+    total_step = 0
+
+    for i in range(epochs):
+        simulator.train()
+        total_loss = 0
+        batch_count = 0
+
+        # Only train on the first 1000 batches
+        progress_bar = tqdm(train_loader, desc=f"Epoch {i}")
+        for batch in progress_bar:
+            if total_step > 1000:
+                break
+            optimizer.zero_grad()
+
+            batch = batch.to(device)
+            preds = simulator(batch)
+
+            loss = loss_fn(preds, batch.y)
+            loss.backward()
+
+            optimizer.step()
+            scheduler.step()
+            total_loss += loss.item()
+            batch_count += 1
+            progress_bar.set_postfix(
+                {
+                    "loss": loss.item(),
+                    "avg_loss": total_loss / batch_count,
+                    "lr": optimizer.param_groups[0]["lr"],
+                }
+            )
+
+            if sweep:
+                wandb.log(
+                    {
+                        "avg_loss": total_loss / batch_count,
+                        "lr": optimizer.param_groups[0]["lr"],
+                    }
+                )
+
+            total_step += 1
+
+            if total_step % 1000 == 0:
+                simulator.eval()
+                eval_loss, onestep_mse = oneStepMSE(simulator, valid_loader, metadata)
+                tqdm.write(f"\nEval: Loss: {eval_loss}, One Step MSE: {onestep_mse}")
+                simulator.train()
+
+    return
+
+
+def start_train_sweep():
+    wandb.init(project="gnn_project")
+    params = wandb.config
+
+    metadata = get_metadata()
+
+    train_dataset = OneStepDataset(
+        "data/processed/train.npz",
+        metadata,
+        window_size=params.window_size,
+        noise_std=params.noise_std,
+    )
+    valid_dataset = OneStepDataset(
+        "data/processed/valid.npz",
+        metadata,
+        window_size=params.window_size,
+        noise_std=0.0,
+    )
+    train_loader = pyg.loader.DataLoader(
+        train_dataset,
+        batch_size=params.batch_size,
+        shuffle=True,
+        pin_memory=True,
+        num_workers=2,
+    )
+    valid_loader = pyg.loader.DataLoader(
+        valid_dataset,
+        batch_size=params.batch_size,
+        shuffle=False,
+        pin_memory=True,
+        num_workers=2,
+    )
+
+    print(f"Using device: {device}")
+
+    simulator = LearnedSimulator(window_size=params.window_size)
+    simulator = simulator.to(device)
+
+    sweep_train(
+        params,
+        simulator,
+        train_loader,
+        valid_loader,
+        metadata,
+        epochs=1,
+        load_epoch=0,
+        sweep=True,
+    )
+
+
+def train(
     params: dict,
     simulator: torch.nn.Module,
     train_loader: pyg.data.DataLoader,
     valid_loader: pyg.data.DataLoader,
+    metadata: dict,
 ) -> None:
     loss_fn = nn.MSELoss()
     optimizer = torch.optim.Adam(simulator.parameters(), lr=params["lr"])
@@ -114,7 +341,7 @@ def train(
         for batch in progress_bar:
             optimizer.zero_grad()
 
-            batch = batch.to(device)
+            batch = batch.cuda()
             preds = simulator(batch)
 
             loss = loss_fn(preds, batch.y)
@@ -152,21 +379,33 @@ def train(
                         f"checkpoint_{total_step}.pt",
                     ),
                 )
+        torch.save(
+            {
+                "model": simulator.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
+            },
+            os.path.join(
+                params["model_path"],
+                f"epoch_{params["load_epoch"] + 1 + i}",
+                f"final_checkpoint_epoch_{params["load_epoch"] + 1 + i}.pt",
+            ),
+        )
 
-        return
+    return
 
 
-if __name__ == "__main__":
+def default_train():
     params = {
         "epochs": 5,
-        "batch_size": 16,
-        "lr": 1e-4,
-        "noise_std": 3e-4,
+        "batch_size": 8,
+        "lr": 0.00305080362891173,
+        "noise_std": 0.0008645544026624157,
         "save_interval": 1000,
         "eval_interval": 1000,
         "model_path": "checkpoints",
         "load_epoch": 0,
-        "window_size": 7,
+        "window_size": 3,
     }
 
     if not os.path.exists(params["model_path"]):
@@ -205,10 +444,8 @@ if __name__ == "__main__":
         num_workers=2,
     )
 
-    print(f"Using device: {device}")
-
     simulator = LearnedSimulator(window_size=params["window_size"])
-    simulator = simulator.to(device)
+    simulator = simulator.cuda()
 
     # Load the model
     if params["load_epoch"] != 0:
@@ -218,4 +455,15 @@ if __name__ == "__main__":
         )
         simulator.load_state_dict(checkpoint["model"])
 
-    train(params, simulator, train_loader, valid_loader)
+    train(params, simulator, train_loader, valid_loader, metadata)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--sweep", type=bool, default=False)
+    args = parser.parse_args()
+    if args.sweep:
+        sweep_id = wandb.sweep(sweep_configuration, project="second_sweep")
+        wandb.agent(sweep_id, function=start_train_sweep)
+    else:
+        default_train()
