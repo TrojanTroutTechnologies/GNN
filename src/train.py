@@ -8,6 +8,10 @@ from tqdm import tqdm
 from utils import load_npz, to_graph, get_metadata
 from gnn_network import LearnedSimulator
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if torch.backends.mps.is_available():
+    device = torch.device("mps")
+
 
 class OneStepDataset(pyg.data.Dataset):
     def __init__(self, path, metadata, window_size=5, noise_std=0.0):
@@ -69,11 +73,11 @@ def oneStepMSE(
     scale = (
         torch.sqrt(torch.tensor(metadata["acc_std"]) ** 2)
         + torch.tensor(metadata["acc_mean"])
-    ).cuda()
+    ).to(device)
     simulator.eval()
     with torch.no_grad():
         for window in valid_simulation:
-            window = window.cuda()
+            window = window.to(device)
             preds = simulator(window)
 
             mse = (((preds - window.y) * scale) ** 2).sum(dim=-1).mean()
@@ -110,7 +114,7 @@ def train(
         for batch in progress_bar:
             optimizer.zero_grad()
 
-            batch = batch.cuda()
+            batch = batch.to(device)
             preds = simulator(batch)
 
             loss = loss_fn(preds, batch.y)
@@ -201,8 +205,10 @@ if __name__ == "__main__":
         num_workers=2,
     )
 
+    print(f"Using device: {device}")
+
     simulator = LearnedSimulator(window_size=params["window_size"])
-    simulator = simulator.cuda()
+    simulator = simulator.to(device)
 
     # Load the model
     if params["load_epoch"] != 0:
