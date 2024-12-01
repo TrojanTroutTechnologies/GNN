@@ -7,7 +7,7 @@ import torch_geometric as pyg
 from tqdm import tqdm
 import wandb
 
-from utils import load_npz, to_graph, get_metadata
+from utils import load_npz, to_graph, get_metadata, rollout
 from gnn_network import LearnedSimulator
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -75,6 +75,26 @@ class OneStepDataset(pyg.data.Dataset):
         return graph
 
 
+def rolloutMSE(
+    simulator: torch.nn.Module,
+    valid_simulation: pyg.loader.DataLoader,
+    metadata: dict,
+    # noise:
+):
+    total_loss = 0.0
+    batch_count = 0
+    simulator.eval()
+
+    with torch.no_grad():
+        for window in valid_simulation:
+            rollout_out = rollout(simulator, window, metadata)
+            rollout_out = rollout_out.permute(1, 0, 2)
+            loss = ((rollout_out - window["position"]) ** 2).sum(dim=-1).mean()
+            total_loss += loss.item()
+            batch_count += 1
+    return total_loss / batch_count
+
+
 def oneStepMSE(
     simulator: torch.nn.Module,
     valid_simulation: pyg.loader.DataLoader,
@@ -103,97 +123,6 @@ def oneStepMSE(
             batch_count += 1
 
     return total_loss / batch_count, total_mse / batch_count
-
-
-def train(
-    params,
-    simulator: torch.nn.Module,
-    train_loader: pyg.data.DataLoader,
-    valid_loader: pyg.data.DataLoader,
-    epochs: int = 1,
-    load_epoch: int = 0,
-    sweep: bool = False,
-) -> None:
-
-    loss_fn = nn.MSELoss()
-    optimizer = torch.optim.Adam(simulator.parameters(), lr=params.lr)
-
-    scheduler = torch.optim.lr_scheduler.ExponentialLR(
-        optimizer, gamma=0.1 ** (1 / 5e6)
-    )
-
-    # log the loss
-    total_step = 0
-
-    for i in range(epochs):
-        simulator.train()
-        total_loss = 0
-        batch_count = 0
-
-        progress_bar = tqdm(train_loader, desc=f"Epoch {i}")
-        for batch in progress_bar:
-            optimizer.zero_grad()
-
-            batch = batch.to(device)
-            preds = simulator(batch)
-
-            loss = loss_fn(preds, batch.y)
-            loss.backward()
-
-            optimizer.step()
-            scheduler.step()
-            total_loss += loss.item()
-            batch_count += 1
-            progress_bar.set_postfix(
-                {
-                    "loss": loss.item(),
-                    "avg_loss": total_loss / batch_count,
-                    "lr": optimizer.param_groups[0]["lr"],
-                }
-            )
-
-            if sweep:
-                wandb.log(
-                    {
-                        "avg_loss": total_loss / batch_count,
-                        "lr": optimizer.param_groups[0]["lr"],
-                    }
-                )
-
-            total_step += 1
-
-            if total_step % params["eval_interval"] == 0:
-                simulator.eval()
-                eval_loss, onestep_mse = oneStepMSE(simulator, valid_loader, metadata)
-                tqdm.write(f"\nEval: Loss: {eval_loss}, One Step MSE: {onestep_mse}")
-                simulator.train()
-
-            if total_step % params["save_interval"] == 0:
-                torch.save(
-                    {
-                        "model": simulator.state_dict(),
-                        "optimizer": optimizer.state_dict(),
-                        "scheduler": scheduler.state_dict(),
-                    },
-                    os.path.join(
-                        params["model_path"],
-                        f"epoch_{load_epoch + 1 + i}",
-                        f"checkpoint_{total_step}.pt",
-                    ),
-                )
-        torch.save(
-            {
-                "model": simulator.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "scheduler": scheduler.state_dict(),
-            },
-            os.path.join(
-                params["model_path"],
-                f"epoch_{load_epoch + 1 + i}",
-                f"final_checkpoint_epoch_{load_epoch + 1 + i}.pt",
-            ),
-        )
-    return
 
 
 def sweep_train(
@@ -366,6 +295,12 @@ def train(
                 tqdm.write(f"\nEval: Loss: {eval_loss}, One Step MSE: {onestep_mse}")
                 simulator.train()
 
+            if total_step % params["rollout_interval"] == 0:
+                simulator.eval()
+                rollout_loss = rolloutMSE(simulator, valid_loader, metadata)
+                tqdm.write(f"\nRollout Loss: {rollout_loss}")
+                simulator.train()
+
             if total_step % params["save_interval"] == 0:
                 torch.save(
                     {
@@ -403,6 +338,7 @@ def default_train():
         "noise_std": 0.0008645544026624157,
         "save_interval": 1000,
         "eval_interval": 1000,
+        "rollout_interval": 1000,
         "model_path": "checkpoints",
         "load_epoch": 0,
         "window_size": 3,
