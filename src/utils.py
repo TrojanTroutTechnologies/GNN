@@ -43,8 +43,8 @@ def visualize_simulation(timesteps: np.ndarray, checkpoint: int) -> None:
 
 def generate_noise(
     position_seq: torch.Tensor, velocity_seq: torch.Tensor, noise_std: float
-) -> torch.Tensor:
-    """Generate noise for a trajectory"""
+) -> (torch.Tensor, torch.Tensor):
+    """Generate noise for a trajectory."""
     # Generate Gaussian noise
     noise = torch.randn_like(velocity_seq) * (noise_std / velocity_seq.size(0) ** 0.5)
     # Accumulate noise as a random walk
@@ -61,20 +61,40 @@ def generate_noise(
     return noisy_position_seq, noisy_velocity_seq
 
 
-def to_graph(
-    particle_type: torch.Tensor,
-    position_seq: torch.Tensor,
-    target_position: torch.Tensor,
-    metadata: dict,
-    noise_std: float = 0.0,
-) -> pyg.data.Data:
-    """Preprocess a trajectory and construct the graph"""
-    # Compute velocity sequence and add noise
-    velocity_seq = position_seq[1:] - position_seq[:-1]
-    position_seq, velocity_seq = generate_noise(position_seq, velocity_seq, noise_std)
-    recent_position = position_seq[-1]
+def compute_normalized_velocity(
+    velocity_seq: torch.Tensor, metadata: dict, noise_std: float
+) -> torch.Tensor:
+    """Compute normalized velocity given velocity sequence and metadata."""
+    vel_mean = torch.tensor(metadata["vel_mean"]).view(1, -1)
+    vel_std = torch.tensor(metadata["vel_std"]).view(1, -1)
+    normal_velocity_seq = (velocity_seq - vel_mean) / torch.sqrt(
+        vel_std**2 + noise_std**2
+    )
+    return normal_velocity_seq
 
-    # Construct the graph using radius-based connectivity
+
+def compute_distance_to_boundary(
+    recent_position: torch.Tensor, metadata: dict
+) -> torch.Tensor:
+    """Compute normalized distance to boundary for each particle."""
+    boundary = torch.tensor(metadata["bounds"])
+    boundary = boundary.unsqueeze(0).expand(recent_position.size(0), -1, -1)
+    distance_to_lower_boundary = recent_position - boundary[:, :, 0]
+    distance_to_upper_boundary = boundary[:, :, 1] - recent_position
+    distance_to_boundary = torch.cat(
+        (distance_to_lower_boundary, distance_to_upper_boundary), dim=-1
+    )
+    # Normalize distances to [-1, 1]
+    distance_to_boundary = torch.tanh(
+        distance_to_boundary / metadata["default_connectivity_radius"]
+    )
+    return distance_to_boundary
+
+
+def compute_edges(
+    recent_position: torch.Tensor, metadata: dict
+) -> (torch.Tensor, torch.Tensor):
+    """Compute the graph edges and their attributes (displacements, distances)."""
     num_particles = recent_position.size(0)
     edge_index = pyg.nn.radius_graph(
         recent_position,
@@ -82,63 +102,70 @@ def to_graph(
         loop=True,
         max_num_neighbors=num_particles - 1,
     )
-
-    # Node-level features: Normalize velocity
-    vel_mean = torch.tensor(metadata["vel_mean"]).view(
-        1, -1
-    )  # Match shape of velocity_seq
-    vel_std = torch.tensor(metadata["vel_std"]).view(1, -1)
-    normal_velocity_seq = (velocity_seq - vel_mean) / torch.sqrt(
-        vel_std**2 + noise_std**2
-    )
-
-    # Compute distances to the boundary
-    boundary = torch.tensor(metadata["bounds"])  # Shape: [2, 2]
-    boundary = boundary.unsqueeze(0).expand(
-        recent_position.size(0), -1, -1
-    )  # Match recent_position
-    distance_to_lower_boundary = recent_position - boundary[:, :, 0]
-    distance_to_upper_boundary = boundary[:, :, 1] - recent_position
-    distance_to_boundary = torch.cat(
-        (distance_to_lower_boundary, distance_to_upper_boundary), dim=-1
-    )
-
-    # use tanh to normalize the distance to [-1, 1]
-    distance_to_boundary = torch.tanh(distance_to_boundary)
-
-    # Edge-level features: Displacement and distance
     edge_displacement = recent_position[edge_index[0]] - recent_position[edge_index[1]]
-    edge_displacement /= metadata["default_connectivity_radius"] + 1e-8
+    edge_displacement /= metadata["default_connectivity_radius"]
     edge_distance = torch.norm(edge_displacement, dim=-1, keepdim=True)
+    return edge_index, torch.cat((edge_displacement, edge_distance), dim=-1)
 
-    # Compute ground truth acceleration for training (if target_position is provided)
+
+def compute_acceleration(
+    recent_position: torch.Tensor,
+    velocity_seq: torch.Tensor,
+    target_position: torch.Tensor,
+    metadata: dict,
+    noise_std: float,
+) -> torch.Tensor:
+    """Compute normalized acceleration if target_position is given, else return zeros."""
     if target_position is not None:
         last_velocity = velocity_seq[-1]
         next_velocity = target_position - recent_position
         acceleration = next_velocity - last_velocity
-        acc_mean = torch.tensor(metadata["acc_mean"]).view(
-            1, -1
-        )  # Match acceleration shape
+        acc_mean = torch.tensor(metadata["acc_mean"]).view(1, -1)
         acc_std = torch.tensor(metadata["acc_std"]).view(1, -1)
         acceleration = (acceleration - acc_mean) / torch.sqrt(acc_std**2 + noise_std**2)
     else:
-        acceleration = torch.zeros_like(
-            recent_position
-        )  # Default to zero for inference
+        acceleration = torch.zeros_like(recent_position)
+    return acceleration
 
-    # Construct and return the graph
+
+def to_graph(
+    particle_type: torch.Tensor,
+    position_seq: torch.Tensor,
+    target_position: torch.Tensor,
+    metadata: dict,
+    noise_std: float = 0.0,
+) -> pyg.data.Data:
+    """Preprocess a trajectory and construct the graph."""
+
+    velocity_seq = position_seq[1:] - position_seq[:-1]
+    position_seq, velocity_seq = generate_noise(position_seq, velocity_seq, noise_std)
+    recent_position = position_seq[-1]
+
+    edge_index, edge_attr = compute_edges(recent_position, metadata)
+
+    normal_velocity_seq = compute_normalized_velocity(velocity_seq, metadata, noise_std)
+
+    distance_to_boundary = compute_distance_to_boundary(recent_position, metadata)
+
+    # Compute acceleration (if target_position is provided)
+    acceleration = compute_acceleration(
+        recent_position, velocity_seq, target_position, metadata, noise_std
+    )
+
+    final_node_features = torch.cat(
+        (
+            normal_velocity_seq.reshape(normal_velocity_seq.size(1), -1),
+            distance_to_boundary,
+        ),
+        dim=-1,
+    )
+
     graph = pyg.data.Data(
         x=particle_type,
         edge_index=edge_index,
-        edge_attr=torch.cat((edge_displacement, edge_distance), dim=-1),
+        edge_attr=edge_attr,
         y=acceleration,
-        pos=torch.cat(
-            (
-                normal_velocity_seq.reshape(normal_velocity_seq.size(1), -1),
-                distance_to_boundary,
-            ),
-            dim=-1,
-        ),
+        pos=final_node_features,
     )
     return graph
 
@@ -147,7 +174,6 @@ def rollout(
     model: torch.nn.Module,
     data: pyg.loader.DataLoader,
     metadata: dict,
-    noise_std: float = 0.0,
     device: str = "cuda",
 ) -> torch.Tensor:
     model.eval()
@@ -157,12 +183,12 @@ def rollout(
     graph = data[0]
 
     window_size = model.window_size
-    num_timesteps = 1000
+    num_timesteps = len(data.data[0].tolist()["simulation_0"][0])
 
     traj = positions[: window_size - 1]
 
     print("Rolling out the model...")
-    for time in range(num_timesteps - window_size):
+    for time in range(num_timesteps - window_size + 1):
         with torch.no_grad():
             if time != 0:
                 graph = to_graph(
@@ -172,7 +198,7 @@ def rollout(
             acceleration = model(graph).cpu()
 
             acceleration = acceleration * torch.sqrt(
-                torch.tensor(metadata["acc_std"]) ** 2 + noise_std**2
+                torch.tensor(metadata["acc_std"]) ** 2
             ) + torch.tensor(metadata["acc_mean"])
 
             recent_position = traj[-1]
