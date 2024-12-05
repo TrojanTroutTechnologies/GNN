@@ -1,3 +1,3 @@
-from .utils import visualize_simulation, rollout, get_metadata
-from .gnn import LearnedSimulator
-from .train import OneStepDataset
+from src.utils import visualize_simulation, rollout, get_metadata
+from src.gnn import LearnedSimulator
+from src.train import OneStepDataset

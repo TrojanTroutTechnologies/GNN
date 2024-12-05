@@ -1,17 +1,9 @@
+from src.gnn import LearnedSimulator
+from src.train import OneStepDataset
+from src.utils import visualize_simulation, rollout, get_metadata
+
 import torch
 import argparse
-import sys
-import os
-
-sys.path.append(os.path.dirname(os.path.abspath(__file__)) + "/..")
-
-from src import (
-    LearnedSimulator,
-    OneStepDataset,
-    visualize_simulation,
-    rollout,
-    get_metadata,
-)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
