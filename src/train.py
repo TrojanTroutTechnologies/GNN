@@ -5,8 +5,8 @@ import torch.nn as nn
 import torch_geometric as pyg
 from tqdm import tqdm
 
-from utils import load_npz, to_graph, get_metadata, rollout
-from gnn_network import LearnedSimulator
+from .utils import load_npz, to_graph, get_metadata, rollout
+from .gnn import LearnedSimulator
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 if torch.backends.mps.is_available():
