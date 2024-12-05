@@ -5,59 +5,12 @@ import torch.nn as nn
 import torch_geometric as pyg
 from tqdm import tqdm
 
-from src.utils import load_npz, to_graph, get_metadata, rollout
+from src.utils import OneStepDataset, get_metadata, rollout
 from src.gnn import LearnedSimulator
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 if torch.backends.mps.is_available():
     device = torch.device("mps")
-
-
-class OneStepDataset(pyg.data.Dataset):
-    def __init__(self, path, metadata, window_size=5, noise_std=0.0):
-        super().__init__()
-        self.data = load_npz(path)
-        self.metadata = metadata
-        self.noise_std = noise_std
-
-        self.window_size = window_size
-        self.windows = []
-        self._create_windows()
-
-    def _create_windows(self):
-        for sim in self.data[0].tolist().values():
-            timesteps = sim[0]
-            for i in range(0, len(timesteps) - self.window_size):
-                trajectories = timesteps[i : i + self.window_size]
-                assert len(trajectories) == self.window_size
-                window = {
-                    "size": len(sim[1]),
-                    "particle_type": sim[1],
-                    "trajectories": trajectories,
-                }
-                self.windows.append(window)
-
-    def len(self):
-        return len(self.windows)
-
-    def get(self, idx):
-        window = self.windows[idx]
-        particle_type = torch.from_numpy(window["particle_type"])
-        trajectories = window["trajectories"]
-        target_position = np.array(trajectories[-1])
-        position_seq = np.array(trajectories[:-1])
-        target_position = torch.from_numpy(target_position)
-        position_seq = torch.from_numpy(position_seq)
-
-        with torch.no_grad():
-            graph = to_graph(
-                particle_type,
-                position_seq,
-                target_position,
-                self.metadata,
-                self.noise_std,
-            )
-        return graph
 
 
 def rolloutMSE(
