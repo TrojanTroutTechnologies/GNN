@@ -1,14 +1,8 @@
-# GNN
-
 # **Abstract**
-
-
 
 Graph Neural Networks (GNNs) provide a powerful and flexible framework for simulating complex physical systems, including fluid dynamics, by representing particles as nodes and their interactions as edges. This approach reduces reliance on computationally expensive physical models, such as those used in traditional computational fluid dynamics (CFD), which often require solving complex partial differential equations in real time. Our implementation is based on DeepMind's Learning to Simulate paper. To validate our approach, we use the WaterDrop dataset, originally generated with the Material Point Method (MPM). While our GNN models produce fluid behavior that is visually plausible and captures key dynamics such as splashes and waves, the resulting simulations are less dynamic and somewhat “heavier” than the ground truth. Despite this limitation, the learned model remains more computationally efficient than traditional simulators, making it a promising tool for real-time applications such as gaming and virtual reality.
 
 ---
-
-GitHub Link: https://github.com/TrojanTroutTechnologies/GNN
 
 # **Introduction**
 
@@ -344,7 +338,8 @@ Our next step was to perform a Weights & Biases sweep to find the best hyperpara
 
 
 
-![hyperparameter_sweep.png]()
+![sweep](https://github.com/TrojanTroutTechnologies/GNN/blob/main/resources/wandb_sweep.png?raw=true)
+</br>
 
 ![clumping](https://github.com/TrojanTroutTechnologies/GNN/blob/c64ca85bbbae16914e3a6375339ef052fd71db43/resources/clumping.gif?raw=true)  
 </br>
