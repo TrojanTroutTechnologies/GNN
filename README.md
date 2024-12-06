@@ -280,8 +280,8 @@ In developing the function for constructing graph representations of the particl
 
 ##### **1. Normalization of Distance to Boundary:**
 
-* **Reference:** They used ```torch.clip``` to normalize distance_to_boundary to the range [-1.0, 1.0]
-* **Our Implementation:** We apply ```torch.tanh()``` to map distance_to_boundary smoothly to [−1,1][−1,1]
+* **Reference:** They used ```torch.clip``` to normalize distance_to_boundary to the range [-1, 1]
+* **Our Implementation:** We apply ```torch.tanh()``` to map distance_to_boundary smoothly to [−1, 1]
 * **Rationale:** tanh provides a differentiable and smooth normalization function, facilitating better gradient flow and information preservation. We found that this implementation choice leads to improved qualitative results, enabling the model to learn more nuanced boundary interactions.
 
 ##### **2. Edge Displacement Calculation:**
